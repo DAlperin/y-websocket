@@ -25,6 +25,7 @@ const messageSync = 0
 const messageQueryAwareness = 3
 const messageAwareness = 1
 const messageAuth = 2
+const messageSubDocSync = 4
 
 /**
  *                       encoder,          decoder,          provider,          emitSynced, messageType
@@ -51,6 +52,18 @@ messageHandlers[messageAwareness] = (encoder, decoder, provider, emitSynced, mes
 
 messageHandlers[messageAuth] = (encoder, decoder, provider, emitSynced, messageType) => {
   authProtocol.readAuthMessage(decoder, provider.doc, permissionDeniedHandler)
+}
+
+messageHandlers[messageSubDocSync] = (encoder, decoder, provider, emitSynced, messageType) => {
+  const subDocID = decoding.readVarString(decoder)
+  encoding.writeVarUint(encoder, messageSync)
+  const subDoc = provider.getSubDoc(subDocID)
+  if (subDoc) {
+    const syncMessageType = syncProtocol.readSyncMessage(decoder, encoder, subDoc, provider)
+    if (emitSynced && syncMessageType === syncProtocol.messageYjsSyncStep2) {
+      subDoc.emit('synced', [true])
+    }
+  }
 }
 
 const reconnectTimeoutBase = 1200
@@ -190,7 +203,7 @@ export class WebsocketProvider extends Observable {
    * @param {typeof WebSocket} [opts.WebSocketPolyfill] Optionall provide a WebSocket polyfill
    * @param {number} [opts.resyncInterval] Request server state every `resyncInterval` milliseconds
    */
-  constructor (serverUrl, roomname, doc, { connect = true, awareness = new awarenessProtocol.Awareness(doc), params = {}, WebSocketPolyfill = WebSocket, resyncInterval = -1 } = {}) {
+  constructor(serverUrl, roomname, doc, { connect = true, awareness = new awarenessProtocol.Awareness(doc), params = {}, WebSocketPolyfill = WebSocket, resyncInterval = -1 } = {}) {
     super()
     // ensure that url is always ends with /
     while (serverUrl[serverUrl.length - 1] === '/') {
@@ -223,6 +236,11 @@ export class WebsocketProvider extends Observable {
      * @type {boolean}
      */
     this.shouldConnect = connect
+
+    /**
+     * @type {Map<string, Y.Doc>}
+     */
+    this.subdocs = new Map()
 
     /**
      * @type {number}
@@ -264,6 +282,85 @@ export class WebsocketProvider extends Observable {
         broadcastMessage(this, encoding.toUint8Array(encoder))
       }
     }
+
+    /**
+     * When dealing with subdocs, it is possible to race the websocket connection
+     * where we are ready to load subdocuments but the connection is not yet ready to send
+     * This function is just a quick and dirty retry function for when we can't be sure 
+     * if the connection is present
+     * @param {any} message 
+     * @param {Function} callback 
+     */
+    this.send = function (message, callback) {
+      const ws = this.ws
+      this.waitForConnection(function () {
+        // @ts-ignore
+        ws.send(message);
+        if (typeof callback !== 'undefined') {
+          callback();
+        }
+      }, 1000);
+    };
+
+    /**
+     * 
+     * @param {Function} callback 
+     * @param {Number} interval 
+     */
+    this.waitForConnection = function (callback, interval) {
+      const ws = this.ws
+      if (ws && ws.readyState === 1) {
+        callback();
+      } else {
+        var that = this;
+        // optional: implement backoff for interval here
+        setTimeout(function () {
+          that.waitForConnection(callback, interval);
+        }, interval);
+      }
+    };
+
+    this._getSubDocUpdateHandler = (id) => {
+      /**
+       * 
+       * @param {Uint8Array} update 
+       * @param {WebsocketProvider} origin 
+       */
+      const updateHandler = (update, origin) => {
+          const encoder = encoding.createEncoder()
+          encoding.writeVarUint(encoder, messageSubDocSync)
+          encoding.writeVarString(encoder, id)
+          syncProtocol.writeUpdate(encoder, update)
+          broadcastMessage(this, encoding.toUint8Array(encoder))
+      }
+      return updateHandler
+    }
+
+    /**
+     * Watch for subdoc events and reconcile local state
+     */
+    this.doc.on('subdocs', ({ added, removed, loaded }) => {
+      added.forEach(subdoc => {
+        this.subdocs.set(subdoc.guid, subdoc)
+      })
+      removed.forEach(subdoc => {
+        subdoc.off('update', this._getSubDocUpdateHandler(subdoc.guid))
+        this.subdocs.delete(subdoc.guid)
+      })
+      loaded.forEach(subdoc => {
+        // always send sync step 1 when connected
+        const encoder = encoding.createEncoder()
+        encoding.writeVarUint(encoder, messageSubDocSync)
+        encoding.writeVarString(encoder, subdoc.guid)
+        syncProtocol.writeSyncStep1(encoder, subdoc)
+        if (this.ws) {
+          this.send(encoding.toUint8Array(encoder), () => {
+            subdoc.on('update', this._getSubDocUpdateHandler(subdoc.guid))
+          })
+        }
+      })
+    })
+
     this.doc.on('update', this._updateHandler)
     /**
      * @param {any} changed
@@ -300,11 +397,19 @@ export class WebsocketProvider extends Observable {
   /**
    * @type {boolean}
    */
-  get synced () {
+  get synced() {
     return this._synced
   }
 
-  set synced (state) {
+  /**
+   * 
+   * @param {string} id 
+   */
+  getSubDoc(id) {
+    return this.subdocs.get(id)
+  }
+
+  set synced(state) {
     if (this._synced !== state) {
       this._synced = state
       this.emit('synced', [state])
@@ -312,7 +417,7 @@ export class WebsocketProvider extends Observable {
     }
   }
 
-  destroy () {
+  destroy() {
     if (this._resyncInterval !== 0) {
       clearInterval(this._resyncInterval)
     }
@@ -328,7 +433,7 @@ export class WebsocketProvider extends Observable {
     super.destroy()
   }
 
-  connectBc () {
+  connectBc() {
     if (!this.bcconnected) {
       bc.subscribe(this.bcChannel, this._bcSubscriber)
       this.bcconnected = true
@@ -357,7 +462,7 @@ export class WebsocketProvider extends Observable {
     })
   }
 
-  disconnectBc () {
+  disconnectBc() {
     // broadcast message with local awareness state set to null (indicating disconnect)
     const encoder = encoding.createEncoder()
     encoding.writeVarUint(encoder, messageAwareness)
@@ -369,7 +474,7 @@ export class WebsocketProvider extends Observable {
     }
   }
 
-  disconnect () {
+  disconnect() {
     this.shouldConnect = false
     this.disconnectBc()
     if (this.ws !== null) {
@@ -377,7 +482,7 @@ export class WebsocketProvider extends Observable {
     }
   }
 
-  connect () {
+  connect() {
     this.shouldConnect = true
     if (!this.wsconnected && this.ws === null) {
       setupWS(this)
