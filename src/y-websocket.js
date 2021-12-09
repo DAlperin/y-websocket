@@ -9,17 +9,17 @@ Unlike stated in the LICENSE file, it is not necessary to include the copyright 
 /* eslint-env browser */
 
 import * as Y from 'yjs' // eslint-disable-line
-import * as bc from 'lib0/broadcastchannel'
-import * as time from 'lib0/time'
-import * as encoding from 'lib0/encoding'
-import * as decoding from 'lib0/decoding'
+import * as bc from '@dalperin/lib0/broadcastchannel'
+import * as time from '@dalperin/lib0/time'
+import * as encoding from '@dalperin/lib0/encoding'
+import * as decoding from '@dalperin/lib0/decoding'
 import * as syncProtocol from 'y-protocols/sync'
 import * as authProtocol from 'y-protocols/auth'
 import * as awarenessProtocol from 'y-protocols/awareness'
-import * as mutex from 'lib0/mutex'
-import { Observable } from 'lib0/observable'
-import * as math from 'lib0/math'
-import * as url from 'lib0/url'
+import * as mutex from '@dalperin/lib0/mutex'
+import { Observable } from '@dalperin/lib0/observable'
+import * as math from '@dalperin/lib0/math'
+import * as url from '@dalperin/lib0/url'
 
 const messageSync = 0
 const messageQueryAwareness = 3
